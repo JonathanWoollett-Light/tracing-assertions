@@ -13,9 +13,14 @@
 //! let registry = tracing_subscriber::Registry::default();
 //! let subscriber = registry.with(asserter.clone());
 //! let guard = tracing::subscriber::set_default(subscriber);
-//! let assertion = asserter.matches("two"); // Make assertion.
-//! tracing::info!("two"); // Send event.
-//! assert!(assertion); // Check assertion.
+//! let one = asserter.matches("one");
+//! let two = asserter.matches("two");
+//! let and = &one & &two;
+//! tracing::info!("one");
+//! assert!(one);
+//! tracing::info!("two");
+//! assert!(two);
+//! assert!(and);
 //!
 //! drop(guard); // Drop `subscriber` as the current subscriber.
 //! # }
@@ -49,27 +54,74 @@ impl Layer {
             boolean: boolean.clone(),
             assertion_type: AssertionType::Matches(s.into()),
         });
-        Assertion(boolean)
+        Assertion::One(boolean)
     }
 }
 
 enum AssertionType {
     Matches(String),
 }
-#[derive(Debug)]
-pub struct Assertion(Arc<AtomicBool>);
+
+#[derive(Debug, Clone)]
+pub enum Assertion {
+    And(Box<Assertion>, Box<Assertion>),
+    Or(Box<Assertion>, Box<Assertion>),
+    One(Arc<AtomicBool>),
+}
+
 impl std::ops::Not for Assertion {
     type Output = bool;
     fn not(self) -> Self::Output {
-        !self.0.load(std::sync::atomic::Ordering::SeqCst)
+        !&self
     }
 }
 impl std::ops::Not for &Assertion {
     type Output = bool;
     fn not(self) -> Self::Output {
-        !self.0.load(std::sync::atomic::Ordering::SeqCst)
+        !bool::from(self)
     }
 }
+
+impl std::ops::BitAnd for Assertion {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        &self & &rhs
+    }
+}
+impl std::ops::BitAnd for &Assertion {
+    type Output = Assertion;
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Assertion::And(Box::new(self.clone()), Box::new(rhs.clone()))
+    }
+}
+impl std::ops::BitOr for Assertion {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        &self | &rhs
+    }
+}
+impl std::ops::BitOr for &Assertion {
+    type Output = Assertion;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Assertion::Or(Box::new(self.clone()), Box::new(rhs.clone()))
+    }
+}
+
+impl From<&Assertion> for bool {
+    fn from(value: &Assertion) -> Self {
+        match value {
+            Assertion::One(x) => x.load(std::sync::atomic::Ordering::SeqCst),
+            Assertion::And(lhs, rhs) => bool::from(&**lhs) && bool::from(&**rhs),
+            Assertion::Or(lhs, rhs) => bool::from(&**lhs) || bool::from(&**rhs),
+        }
+    }
+}
+impl From<Assertion> for bool {
+    fn from(value: Assertion) -> Self {
+        bool::from(&value)
+    }
+}
+
 struct InnerAssertion {
     boolean: Arc<AtomicBool>,
     assertion_type: AssertionType,
@@ -90,7 +142,6 @@ impl<S: Subscriber> tracing_subscriber::layer::Layer<S> for Layer {
         let mut assertions = self.assertions.lock().unwrap();
         let mut i = 0;
         while i < assertions.len() {
-            dbg!();
             let result = match &assertions[i].assertion_type {
                 AssertionType::Matches(expected) => *expected == message,
             };
@@ -118,30 +169,44 @@ mod tests {
         let subscriber = base_subscriber.with(asserter.clone());
         let guard = tracing::subscriber::set_default(subscriber);
 
-        let assertion = asserter.matches("two");
+        let two = asserter.matches("two");
+        let three = asserter.matches("three");
+        let or = &two | &three;
+        let and = &two & &three;
+        let or2 = two.clone() | three.clone();
+        let and2 = two.clone() & three.clone();
 
         // The assertion is false as message matching `two` has not been encountered.
-        assert!(!&assertion);
+        assert!(!&two);
 
         info!("one");
 
         // Still false.
-        assert!(!&assertion);
+        assert!(!&two);
+        assert!(!&or);
+        assert!(!&or2);
 
         info!("two");
 
         // The assertion is true as a message matching `two` has been encountered.
-        assert!(&assertion);
+        assert!(&two);
+        assert!(or);
+        assert!(or2);
+        assert!(!&and);
+        assert!(!&and2);
 
         info!("three");
 
         // Still true.
-        assert!(assertion);
+        assert!(&two);
+        assert!(and);
+        assert!(and2);
 
         // If an assertion is created after the message, it will be false.
         // Each assertion can only be fulfilled based on messages after its creation.
-        let assertion = asserter.matches("two");
-        assert!(!assertion);
+        let two = asserter.matches("two");
+        assert!(!&two);
+        assert!(!bool::from(two));
 
         drop(guard);
     }
