@@ -2,6 +2,12 @@
 name = "tracing-assertions"
 version = "0.1.0"
 edition = "2021"
+description = "An assertions framework for Tokio tracing."
+license = "Apache-2.0"
+
+repository = "https://github.com/JonathanWoollett-Light/tracing-assertions"
+documentation = "https://docs.rs/tracing-assertions/"
+readme = "./README.md"
 
 [dependencies]
 tracing = "0.1.40"
