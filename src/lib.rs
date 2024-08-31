@@ -40,6 +40,7 @@ use tracing_subscriber::layer::Context;
 
 #[derive(Default, Clone)]
 pub struct Layer {
+    pass_all: Arc<AtomicBool>,
     assertions: Arc<Mutex<Vec<InnerAssertion>>>,
 }
 impl Layer {
@@ -54,7 +55,19 @@ impl Layer {
             boolean: boolean.clone(),
             assertion_type: AssertionType::Matches(s.into()),
         });
-        Assertion::One(boolean)
+        Assertion::One(self.pass_all.clone(), boolean)
+    }
+    /// The inverse of [`Layer::disable`].
+    pub fn enable(&self) {
+        self.pass_all.store(false, SeqCst);
+    }
+    /// Tells all assertions to pass.
+    ///
+    /// Useful when you want to disables certain tested logs in a
+    /// test for debugging without needing to comment out all the
+    /// assertions you added.
+    pub fn disable(&self) {
+        self.pass_all.store(true, SeqCst);
     }
 }
 
@@ -66,7 +79,7 @@ enum AssertionType {
 pub enum Assertion {
     And(Box<Assertion>, Box<Assertion>),
     Or(Box<Assertion>, Box<Assertion>),
-    One(Arc<AtomicBool>),
+    One(Arc<AtomicBool>, Arc<AtomicBool>),
 }
 
 impl std::ops::Not for Assertion {
@@ -110,7 +123,12 @@ impl std::ops::BitOr for &Assertion {
 impl From<&Assertion> for bool {
     fn from(value: &Assertion) -> Self {
         match value {
-            Assertion::One(x) => x.load(std::sync::atomic::Ordering::SeqCst),
+            Assertion::One(pass_all, x) => {
+                if pass_all.load(SeqCst) {
+                    return true;
+                }
+                x.load(std::sync::atomic::Ordering::SeqCst)
+            }
             Assertion::And(lhs, rhs) => bool::from(&**lhs) && bool::from(&**rhs),
             Assertion::Or(lhs, rhs) => bool::from(&**lhs) || bool::from(&**rhs),
         }
@@ -161,6 +179,24 @@ mod tests {
 
     use super::*;
     use tracing_subscriber::{layer::SubscriberExt, Registry};
+
+    #[test]
+    fn pass_all() {
+        let asserter = Layer::default();
+        let base_subscriber = Registry::default();
+        let subscriber = base_subscriber.with(asserter.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        info!("stuff");
+        let condition = asserter.matches("missing");
+        asserter.disable();
+        info!("more stuff");
+        assert!(&condition);
+        asserter.enable();
+        assert!(!condition);
+
+        drop(guard);
+    }
 
     #[test]
     fn matches() {
