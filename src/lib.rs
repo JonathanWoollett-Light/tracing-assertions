@@ -17,14 +17,36 @@
 //! let two = asserter.matches("two");
 //! let and = &one & &two;
 //! tracing::info!("one");
-//! assert!(one);
+//! one.assert();
 //! tracing::info!("two");
-//! assert!(two);
-//! assert!(and);
+//! two.assert();
+//! and.assert();
 //!
 //! drop(guard); // Drop `subscriber` as the current subscriber.
 //! # }
 //! ```
+//!
+//! When failing e.g.
+//! ```should_panic
+//! use tracing_subscriber::layer::SubscriberExt;
+//! # fn main() {
+//! let asserter = tracing_assertions::Layer::default();
+//! let registry = tracing_subscriber::Registry::default();
+//! let subscriber = registry.with(asserter.clone());
+//! let guard = tracing::subscriber::set_default(subscriber);
+//! let one = asserter.matches("one");
+//! let two = asserter.matches("two");
+//! let and = &one & &two;
+//! tracing::info!("one");
+//! and.assert();
+//! drop(guard);
+//! # }
+//! ```
+//! Outputs:
+//! <pre>
+//! thread 'main' panicked at src/lib.rs:14:5:
+//! (<font color="green">"one"</font> && <font color="red">"two"</font>)
+//! </pre>
 
 #![warn(clippy::pedantic)]
 
@@ -41,7 +63,7 @@ use tracing_subscriber::layer::Context;
 #[derive(Default, Clone)]
 pub struct Layer {
     pass_all: Arc<AtomicBool>,
-    assertions: Arc<Mutex<Vec<InnerAssertion>>>,
+    assertions: Arc<Mutex<Vec<Arc<InnerAssertion>>>>,
 }
 impl Layer {
     /// Creates a string matching assertion.
@@ -50,12 +72,15 @@ impl Layer {
     ///
     /// When the internal mutex is poisoned.
     pub fn matches(&self, s: impl Into<String>) -> Assertion {
-        let boolean = Arc::new(AtomicBool::new(false));
-        self.assertions.lock().unwrap().push(InnerAssertion {
-            boolean: boolean.clone(),
+        let inner_assertion = Arc::new(InnerAssertion {
+            boolean: AtomicBool::new(false),
             assertion_type: AssertionType::Matches(s.into()),
         });
-        Assertion::One(self.pass_all.clone(), boolean)
+        self.assertions
+            .lock()
+            .unwrap()
+            .push(inner_assertion.clone());
+        Assertion::One(self.pass_all.clone(), inner_assertion)
     }
     /// The inverse of [`Layer::disable`].
     pub fn enable(&self) {
@@ -71,27 +96,69 @@ impl Layer {
     }
 }
 
+#[derive(Debug)]
 enum AssertionType {
     Matches(String),
+}
+
+impl std::fmt::Display for AssertionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Matches(matches) => write!(f, "{matches}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum Assertion {
     And(Box<Assertion>, Box<Assertion>),
     Or(Box<Assertion>, Box<Assertion>),
-    One(Arc<AtomicBool>, Arc<AtomicBool>),
+    One(Arc<AtomicBool>, Arc<InnerAssertion>),
+    Not(Box<Assertion>),
+}
+impl Assertion {
+    /// Evaluates the assertion.
+    ///
+    /// # Panics
+    ///
+    /// When the assertion is false.
+    #[track_caller]
+    pub fn assert(&self) {
+        assert!(bool::from(self), "{}", self.ansi());
+    }
+    fn ansi(&self) -> String {
+        match self {
+            Assertion::One(pass_all, x) => {
+                let is_true = if pass_all.load(SeqCst) {
+                    true
+                } else {
+                    x.boolean.load(std::sync::atomic::Ordering::SeqCst)
+                };
+                let str = format!("{:?}", x.assertion_type.to_string());
+                let out = if is_true {
+                    ansi_term::Colour::Green.paint(str)
+                } else {
+                    ansi_term::Colour::Red.paint(str)
+                };
+                out.to_string()
+            }
+            Assertion::And(lhs, rhs) => format!("({} && {})", lhs.ansi(), rhs.ansi()),
+            Assertion::Or(lhs, rhs) => format!("({} || {})", lhs.ansi(), rhs.ansi()),
+            Assertion::Not(not) => format!("!{}", not.ansi()),
+        }
+    }
 }
 
 impl std::ops::Not for Assertion {
-    type Output = bool;
+    type Output = Self;
     fn not(self) -> Self::Output {
         !&self
     }
 }
 impl std::ops::Not for &Assertion {
-    type Output = bool;
+    type Output = Assertion;
     fn not(self) -> Self::Output {
-        !bool::from(self)
+        Assertion::Not(Box::new(self.clone()))
     }
 }
 
@@ -127,10 +194,11 @@ impl From<&Assertion> for bool {
                 if pass_all.load(SeqCst) {
                     return true;
                 }
-                x.load(std::sync::atomic::Ordering::SeqCst)
+                x.boolean.load(std::sync::atomic::Ordering::SeqCst)
             }
             Assertion::And(lhs, rhs) => bool::from(&**lhs) && bool::from(&**rhs),
             Assertion::Or(lhs, rhs) => bool::from(&**lhs) || bool::from(&**rhs),
+            Assertion::Not(not) => !bool::from(&**not),
         }
     }
 }
@@ -140,8 +208,9 @@ impl From<Assertion> for bool {
     }
 }
 
-struct InnerAssertion {
-    boolean: Arc<AtomicBool>,
+#[derive(Debug)]
+pub struct InnerAssertion {
+    boolean: AtomicBool,
     assertion_type: AssertionType,
 }
 
@@ -191,10 +260,33 @@ mod tests {
         let condition = asserter.matches("missing");
         asserter.disable();
         info!("more stuff");
-        assert!(&condition);
+        condition.assert();
         asserter.enable();
-        assert!(!condition);
+        (!condition).assert();
 
+        drop(guard);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "((\u{1b}[32m\"one\"\u{1b}[0m && \u{1b}[31m\"two\"\u{1b}[0m) || (\u{1b}[31m\"three\"\u{1b}[0m && !\u{1b}[31m\"four\"\u{1b}[0m))"
+    )]
+    fn panics() {
+        let asserter = Layer::default();
+        let registry = Registry::default();
+        let subscriber = registry.with(asserter.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let one = asserter.matches("one");
+        let two = asserter.matches("two");
+        let three = asserter.matches("three");
+        let four = asserter.matches("four");
+        let assertion = one & two | three & !four;
+        info!("one");
+        asserter.disable();
+        assertion.assert();
+        assert_eq!(assertion.ansi(),"((\u{1b}[32m\"one\"\u{1b}[0m && \u{1b}[32m\"two\"\u{1b}[0m) || (\u{1b}[32m\"three\"\u{1b}[0m && !\u{1b}[32m\"four\"\u{1b}[0m))");
+        asserter.enable();
+        assertion.assert();
         drop(guard);
     }
 
@@ -213,35 +305,35 @@ mod tests {
         let and2 = two.clone() & three.clone();
 
         // The assertion is false as message matching `two` has not been encountered.
-        assert!(!&two);
+        (!&two).assert();
 
         info!("one");
 
         // Still false.
-        assert!(!&two);
-        assert!(!&or);
-        assert!(!&or2);
+        (!&two).assert();
+        (!&or).assert();
+        (!&or2).assert();
 
         info!("two");
 
         // The assertion is true as a message matching `two` has been encountered.
-        assert!(&two);
-        assert!(or);
-        assert!(or2);
-        assert!(!&and);
-        assert!(!&and2);
+        two.assert();
+        or.assert();
+        or2.assert();
+        (!&and).assert();
+        (!&and2).assert();
 
         info!("three");
 
         // Still true.
-        assert!(&two);
-        assert!(and);
-        assert!(and2);
+        two.assert();
+        and.assert();
+        and2.assert();
 
         // If an assertion is created after the message, it will be false.
         // Each assertion can only be fulfilled based on messages after its creation.
         let two = asserter.matches("two");
-        assert!(!&two);
+        (!&two).assert();
         assert!(!bool::from(two));
 
         drop(guard);
