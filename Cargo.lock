@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "tracing-assertions"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ansi_term",
  "tracing",

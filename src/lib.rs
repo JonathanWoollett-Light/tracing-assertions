@@ -1,13 +1,13 @@
+//! [![Crates.io](https://img.shields.io/crates/v/tracing-assertions)](https://crates.io/crates/tracing-assertions)
+//! [![docs](https://img.shields.io/crates/v/tracing-assertions?color=yellow&label=docs)](https://docs.rs/tracing-assertions)
+//! [![codecov](https://codecov.io/gh/JonathanWoollett-Light/tracing-assertions/branch/master/graph/badge.svg?token=II1xtnbCDX)](https://codecov.io/gh/JonathanWoollett-Light/tracing-assertions)
+//! 
 //! An assertions framework for [tracing](https://docs.rs/tracing/latest/tracing/).
 //!
 //! Simpler and faster than the alternatives.
 //!
-//! - **Why use this instead of [tracing_test](https://docs.rs/tracing-test/latest/tracing_test/)?** Typical assertions make use of `lines.iter()` checking every line previously logged.
-//! - **Why use this instead of [tracing_fluent_assertions](https://docs.rs/tracing-fluent-assertions/latest/tracing_fluent_assertions/)?** Works with [`Event`](https://docs.rs/tracing/latest/tracing/struct.Event.html)s.
-//!
 //! ```
 //! use tracing_subscriber::layer::SubscriberExt;
-//! # fn main() {
 //! // Initialize a subscriber with the layer.
 //! let asserter = tracing_assertions::Layer::default();
 //! let registry = tracing_subscriber::Registry::default();
@@ -23,13 +23,11 @@
 //! and.assert();
 //!
 //! drop(guard); // Drop `subscriber` as the current subscriber.
-//! # }
 //! ```
 //!
 //! When failing e.g.
 //! ```should_panic
 //! use tracing_subscriber::layer::SubscriberExt;
-//! # fn main() {
 //! let asserter = tracing_assertions::Layer::default();
 //! let registry = tracing_subscriber::Registry::default();
 //! let subscriber = registry.with(asserter.clone());
@@ -40,13 +38,18 @@
 //! tracing::info!("one");
 //! and.assert();
 //! drop(guard);
-//! # }
 //! ```
 //! Outputs:
 //! <pre>
 //! thread 'main' panicked at src/lib.rs:14:5:
 //! (<font color="green">"one"</font> && <font color="red">"two"</font>)
 //! </pre>
+//!
+//! ### Similar crates
+//! - [test-log](https://crates.io/crates/test-log): A replacement of the `#[test]` attribute that initializes logging and/or tracing infrastructure before running tests.
+//! - [tracing_test](https://crates.io/crates/tracing-test): Helper functions and macros that allow for easier testing of crates that use `tracing`.
+//! - [tracing-fluent-assertions](https://crates.io/crates/tracing-fluent-assertions): An fluent assertions framework for tracing.
+//!
 
 #![warn(clippy::pedantic)]
 
