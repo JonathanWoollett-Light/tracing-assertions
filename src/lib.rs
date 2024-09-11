@@ -25,25 +25,49 @@
 //! drop(guard); // Drop `subscriber` as the current subscriber.
 //! ```
 //!
+//! ### Failing
+//!
 //! When failing e.g.
 //! ```should_panic
-//! use tracing_subscriber::layer::SubscriberExt;
-//! let asserter = tracing_assertions::Layer::default();
-//! let registry = tracing_subscriber::Registry::default();
-//! let subscriber = registry.with(asserter.clone());
-//! let guard = tracing::subscriber::set_default(subscriber);
+//! # use tracing_subscriber::layer::SubscriberExt;
+//! # let asserter = tracing_assertions::Layer::default();
+//! # let registry = tracing_subscriber::Registry::default();
+//! # let subscriber = registry.with(asserter.clone());
+//! # let guard = tracing::subscriber::set_default(subscriber);
 //! let one = asserter.matches("one");
 //! let two = asserter.matches("two");
 //! let and = &one & &two;
 //! tracing::info!("one");
 //! and.assert();
-//! drop(guard);
+//! # drop(guard);
 //! ```
 //! Outputs:
 //! <pre>
 //! thread 'main' panicked at src/lib.rs:14:5:
 //! (<font color="green">"one"</font> && <font color="red">"two"</font>)
 //! </pre>
+//!
+//! ### Operations
+//!
+//! Logical operations clone the underlying assertions.
+//! ```
+//! # use tracing_subscriber::layer::SubscriberExt;
+//! # let asserter = tracing_assertions::Layer::default();
+//! # let registry = tracing_subscriber::Registry::default();
+//! # let subscriber = registry.with(asserter.clone());
+//! # let guard = tracing::subscriber::set_default(subscriber);
+//! let one = asserter.matches("one");
+//! let two = asserter.matches("two");
+//! let and = &one & &two;
+//! tracing::info!("one");
+//! tracing::info!("two");
+//! one.assert().reset();
+//! and.assert().reset();
+//! two.assert();
+//! (!one).assert();
+//! (!and).assert();
+//! ```
+//! Calling [`Assertion::reset`] on `one` does not affect the value of `and` and calling [`Assertion::reset`] on `and` does not affect the value of `two`.
 //!
 //! ### Similar crates
 //! - [test-log](https://crates.io/crates/test-log): A replacement of the `#[test]` attribute that initializes logging and/or tracing infrastructure before running tests.
@@ -52,7 +76,7 @@
 //!
 
 #![warn(clippy::pedantic)]
-#![allow(clippy::enum_glob_use)]
+#![allow(clippy::enum_glob_use)] // Matching is prettier doing this.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
@@ -130,7 +154,7 @@ impl std::fmt::Display for AssertionType {
 pub struct Assertion(AssertionWrapper);
 
 /// This exists since there is no way of making enum variants private.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum AssertionWrapper {
     And {
         lhs: Box<Assertion>,
@@ -148,6 +172,42 @@ enum AssertionWrapper {
         assertion: Box<Assertion>,
     },
 }
+impl Clone for AssertionWrapper {
+    fn clone(&self) -> AssertionWrapper {
+        use AssertionWrapper::*;
+        match &self {
+            One {
+                assertion,
+                asserter,
+            } => {
+                let new_assertion = Arc::new(InnerAssertion {
+                    boolean: AtomicBool::from(assertion.boolean.load(SeqCst)),
+                    assertion_type: assertion.assertion_type.clone(),
+                });
+                asserter
+                    .assertions
+                    .lock()
+                    .unwrap()
+                    .push(new_assertion.clone());
+                One {
+                    assertion: new_assertion,
+                    asserter: asserter.clone(),
+                }
+            }
+            Not { assertion } => Not {
+                assertion: assertion.clone(),
+            },
+            And { lhs, rhs } => And {
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+            },
+            Or { lhs, rhs } => Or {
+                lhs: lhs.clone(),
+                rhs: rhs.clone(),
+            },
+        }
+    }
+}
 
 impl Assertion {
     /// Evaluates the assertion.
@@ -155,9 +215,11 @@ impl Assertion {
     /// # Panics
     ///
     /// When the assertion is false.
+    #[allow(clippy::must_use_candidate)] // `let _ = x.assert();` is ugly.
     #[track_caller]
-    pub fn assert(&self) {
+    pub fn assert(&self) -> &Self {
         assert!(bool::from(self), "{}", self.ansi());
+        self
     }
     /// Create a new assertion with the same condition.
     ///
@@ -226,8 +288,7 @@ impl Assertion {
     /// let guard = tracing::subscriber::set_default(subscriber);
     /// let one = asserter.matches("one");
     /// tracing::info!("one");
-    /// one.assert();
-    /// one.reset();
+    /// one.assert().reset();
     /// (!&one).assert();
     /// tracing::info!("one");
     /// one.assert();
@@ -547,26 +608,21 @@ mod tests {
         let and = &one & &two;
         let not = !&one;
 
+        not.assert().reset();
+
         info!("one");
         info!("two");
 
-        one.assert();
-        two.assert();
-        or.assert();
-        and.assert();
-        (!&not).assert();
-
-        one.reset();
-        two.reset();
-        or.reset();
-        and.reset();
-        not.reset();
+        one.assert().reset();
+        two.assert().reset();
+        or.assert().reset();
+        and.assert().reset();
 
         (!&one).assert();
         (!&two).assert();
         (!&or).assert();
         (!&and).assert();
-        (!(!&not)).assert();
+        (!&not).assert();
 
         info!("one");
         info!("two");
