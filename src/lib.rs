@@ -76,6 +76,7 @@
 //!
 
 use std::fmt::Debug;
+use std::ops::{BitAnd, BitOr};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
@@ -419,13 +420,16 @@ impl std::ops::Not for &Assertion {
     }
 }
 
-impl std::ops::BitAnd for Assertion {
+impl BitAnd for Assertion {
     type Output = Self;
     fn bitand(self, rhs: Self) -> Self::Output {
-        &self & &rhs
+        Assertion(AssertionWrapper::And {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(rhs.clone()),
+        })
     }
 }
-impl std::ops::BitAnd for &Assertion {
+impl BitAnd for &Assertion {
     type Output = Assertion;
     fn bitand(self, rhs: Self) -> Self::Output {
         Assertion(AssertionWrapper::And {
@@ -434,15 +438,54 @@ impl std::ops::BitAnd for &Assertion {
         })
     }
 }
-impl std::ops::BitOr for Assertion {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self::Output {
-        &self | &rhs
+impl BitAnd<&Assertion> for Assertion {
+    type Output = Assertion;
+    fn bitand(self, rhs: &Self) -> Self::Output {
+        Assertion(AssertionWrapper::And {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(rhs.clone()),
+        })
     }
 }
-impl std::ops::BitOr for &Assertion {
+impl BitAnd<Assertion> for &Assertion {
+    type Output = Assertion;
+    fn bitand(self, rhs: Assertion) -> Self::Output {
+        Assertion(AssertionWrapper::And {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(rhs.clone()),
+        })
+    }
+}
+impl BitOr for Assertion {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Assertion(AssertionWrapper::Or {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(rhs.clone()),
+        })
+    }
+}
+impl BitOr for &Assertion {
     type Output = Assertion;
     fn bitor(self, rhs: Self) -> Self::Output {
+        Assertion(AssertionWrapper::Or {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(rhs.clone()),
+        })
+    }
+}
+impl BitOr<&Assertion> for Assertion {
+    type Output = Self;
+    fn bitor(self, rhs: &Assertion) -> Self::Output {
+        Assertion(AssertionWrapper::Or {
+            lhs: Box::new(self.clone()),
+            rhs: Box::new(rhs.clone()),
+        })
+    }
+}
+impl BitOr<Assertion> for &Assertion {
+    type Output = Assertion;
+    fn bitor(self, rhs: Assertion) -> Self::Output {
         Assertion(AssertionWrapper::Or {
             lhs: Box::new(self.clone()),
             rhs: Box::new(rhs.clone()),
@@ -604,6 +647,47 @@ mod tests {
         assert_eq!(assertion.ansi(),"((\u{1b}[32m\"one\"\u{1b}[0m && \u{1b}[32m\"two\"\u{1b}[0m) || (\u{1b}[32m\"three\"\u{1b}[0m && !\u{1b}[32m\"four\"\u{1b}[0m))");
         asserter.enable();
         assertion.assert();
+        drop(guard);
+    }
+
+    #[test]
+    fn and() {
+        let asserter = Layer::default();
+        let registry = Registry::default();
+        let subscriber = registry.with(asserter.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let one = asserter.matches("one");
+        let two = asserter.matches("two");
+        let a = &one & two.clone();
+        let b = one.clone() & &two;
+        let c = &one & &two;
+        let d = one & two;
+        info!("one");
+        info!("two");
+        a.assert();
+        b.assert();
+        c.assert();
+        d.assert();
+        drop(guard);
+    }
+
+    #[test]
+    fn or() {
+        let asserter = Layer::default();
+        let registry = Registry::default();
+        let subscriber = registry.with(asserter.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let one = asserter.matches("one");
+        let two = asserter.matches("two");
+        let a = &one | two.clone();
+        let b = one.clone() | &two;
+        let c = &one | &two;
+        let d = one | two;
+        info!("one");
+        a.assert();
+        b.assert();
+        c.assert();
+        d.assert();
         drop(guard);
     }
 
