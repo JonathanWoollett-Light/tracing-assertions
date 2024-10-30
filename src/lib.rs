@@ -75,6 +75,7 @@
 //! - [tracing-fluent-assertions](https://crates.io/crates/tracing-fluent-assertions): An fluent assertions framework for tracing.
 //!
 
+use std::fmt::Debug;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
@@ -121,6 +122,32 @@ impl Layer {
             assertion: inner_assertion.clone(),
             asserter: self.0.clone(),
         })
+    }
+    /// Creates a string matching assertion on the debug string of a value.
+    ///
+    /// This exists because
+    /// ```
+    /// # use tracing_subscriber::{layer::SubscriberExt, Registry};
+    /// # #[derive(Debug)]
+    /// # struct MyStruct { x: i32, y: i32 }
+    /// # let asserter = tracing_assertions::Layer::default();
+    /// # let base_subscriber = Registry::default();
+    /// # let subscriber = base_subscriber.with(asserter.clone());
+    /// # let guard = tracing::subscriber::set_default(subscriber);
+    /// let condition = asserter.debug(MyStruct { x: 2, y: 3 });
+    /// ```
+    /// is more readable than
+    /// ```
+    /// # use tracing_subscriber::{layer::SubscriberExt, Registry};
+    /// # #[derive(Debug)]
+    /// # struct MyStruct { x: i32, y: i32 }
+    /// # let asserter = tracing_assertions::Layer::default();
+    /// # let base_subscriber = Registry::default();
+    /// # let subscriber = base_subscriber.with(asserter.clone());
+    /// # let guard = tracing::subscriber::set_default(subscriber);
+    /// let condition = asserter.matches(format!("{:?}", MyStruct { x: 2, y: 3 }));
+    pub fn debug(&self, s: impl Debug) -> Assertion {
+        self.matches(format!("{s:?}"))
     }
     /// Creates a regex matching assertion.
     ///
@@ -516,6 +543,25 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
         let condition = asserter.regex("01234.789").unwrap();
         info!("0123456789");
+        condition.assert();
+        drop(guard);
+    }
+
+    #[test]
+    fn debug() {
+        #[allow(dead_code)]
+        #[derive(Debug)]
+        struct MyStruct {
+            x: i32,
+            y: i32,
+        }
+        let asserter = Layer::default();
+        let base_subscriber = Registry::default();
+        let subscriber = base_subscriber.with(asserter.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let value = MyStruct { x: 2, y: 3 };
+        let condition = asserter.debug(&value);
+        info!("{value:?}");
         condition.assert();
         drop(guard);
     }
