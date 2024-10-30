@@ -75,9 +75,6 @@
 //! - [tracing-fluent-assertions](https://crates.io/crates/tracing-fluent-assertions): An fluent assertions framework for tracing.
 //!
 
-#![warn(clippy::pedantic)]
-#![allow(clippy::enum_glob_use)] // Matching is prettier doing this.
-
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::Arc;
@@ -87,6 +84,9 @@ use tracing::Event;
 use tracing::Subscriber;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::layer::Context;
+
+#[cfg(feature = "regex")]
+use regex::Regex;
 
 /// The assertion layer.
 #[derive(Default, Clone, Debug)]
@@ -122,6 +122,34 @@ impl Layer {
             asserter: self.0.clone(),
         })
     }
+    /// Creates a regex matching assertion.
+    ///
+    /// # Errors
+    ///
+    /// When the conversion to [`Regex`] fails.
+    ///
+    /// # Panics
+    ///
+    /// When the internal mutex is poisoned.
+    #[cfg(feature = "regex")]
+    pub fn regex<T>(&self, s: T) -> Result<Assertion, <Regex as TryFrom<T>>::Error>
+    where
+        Regex: TryFrom<T>,
+    {
+        let inner_assertion = Arc::new(InnerAssertion {
+            boolean: AtomicBool::new(false),
+            assertion_type: AssertionType::Regex(Regex::try_from(s)?),
+        });
+        self.0
+            .assertions
+            .lock()
+            .unwrap()
+            .push(inner_assertion.clone());
+        Ok(Assertion(AssertionWrapper::One {
+            assertion: inner_assertion.clone(),
+            asserter: self.0.clone(),
+        }))
+    }
     /// The inverse of [`Layer::disable`].
     pub fn enable(&self) {
         self.0.pass_all.store(false, SeqCst);
@@ -139,12 +167,17 @@ impl Layer {
 #[derive(Debug, Clone)]
 enum AssertionType {
     Matches(String),
+    #[cfg(feature = "regex")]
+    Regex(Regex),
 }
 
 impl std::fmt::Display for AssertionType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        use AssertionType::*;
         match self {
-            Self::Matches(matches) => write!(f, "{matches}"),
+            Matches(matches) => write!(f, "{matches}"),
+            #[cfg(feature = "regex")]
+            Regex(regex) => write!(f, "{regex}"),
         }
     }
 }
@@ -425,7 +458,7 @@ struct InnerAssertion {
 }
 
 struct EventVisitor<'a>(&'a mut String);
-impl<'a> Visit for EventVisitor<'a> {
+impl Visit for EventVisitor<'_> {
     fn record_debug(&mut self, _field: &Field, value: &dyn std::fmt::Debug) {
         *self.0 = format!("{value:?}");
     }
@@ -441,6 +474,7 @@ impl<S: Subscriber> tracing_subscriber::layer::Layer<S> for Layer {
         while i < assertions.len() {
             let result = match &assertions[i].assertion_type {
                 AssertionType::Matches(expected) => *expected == message,
+                AssertionType::Regex(regex) => regex.is_match(&message),
             };
             assertions[i].boolean.store(result, SeqCst);
             if result {
@@ -458,6 +492,33 @@ mod tests {
 
     use super::*;
     use tracing_subscriber::{layer::SubscriberExt, Registry};
+
+    #[cfg(feature = "regex")]
+    #[test]
+    fn regex_pass() {
+        let asserter = Layer::default();
+        let base_subscriber = Registry::default();
+        let subscriber = base_subscriber.with(asserter.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let condition = asserter.regex("01234.6789").unwrap();
+        info!("0123456789");
+        condition.assert();
+        drop(guard);
+    }
+
+    #[cfg(feature = "regex")]
+    #[should_panic(expected = "\u{1b}[31m\"01234.789\"\u{1b}[0m")]
+    #[test]
+    fn regex_fail() {
+        let asserter = Layer::default();
+        let base_subscriber = Registry::default();
+        let subscriber = base_subscriber.with(asserter.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let condition = asserter.regex("01234.789").unwrap();
+        info!("0123456789");
+        condition.assert();
+        drop(guard);
+    }
 
     #[test]
     fn pass_all() {
